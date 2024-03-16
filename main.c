@@ -16,16 +16,25 @@ typedef struct PCB_s
     int PID;
     enum ProcessState processState;
     int priority;
-    List* readyQueue;
+    List *readyQueue;
     List *incomingMessages; // Change to pointer to List if List is a struct
-    
+    char currMessage[40];
+    bool messageReceived;
 } PCB;
+
+typedef struct Message_s
+{
+    int senderPID;
+    int receiverPID;
+    char message[40];
+
+} Message;
 
 static List *allProcesses;
 static List *readyZero;
 static List *readyOne;
 static List *readyTwo;
-static List *blockedSenders;
+static List *blockedSendersQueue;
 static List *blockedReceivers;
 
 PCB *initProcess;
@@ -40,7 +49,7 @@ void forkProcess();
 void static printListPIDs(List *pLlist);
 void totalInfo();
 void quantumExpire();
-void setProcessAsRunning(List *queue);
+void setNextRunningProcess();
 void exitRunningProcess();
 
 void static printListPIDs(List *pList)
@@ -61,7 +70,7 @@ void initializeOS()
     readyZero = List_create();
     readyOne = List_create();
     readyTwo = List_create();
-    blockedSenders = List_create();
+    blockedSendersQueue = List_create();
     blockedReceivers = List_create();
 
     initProcess = (PCB *)malloc(sizeof(PCB));
@@ -71,28 +80,11 @@ void initializeOS()
     runningProcess = initProcess;
 }
 
-void putProcessOnQueue(PCB *process, int priority)
+void putProcessOnQueue(PCB *process)
 {
-    switch (priority)
-    {
-    case 0:
-        List_append(allProcesses, (void *)process);
-        List_prepend(readyZero, (void *)process);
-        break;
-    case 1:
-        List_append(allProcesses, (void *)process);
-        List_prepend(readyOne, (void *)process);
-        break;
-    case 2:
-        List_append(allProcesses, (void *)process);
-        List_prepend(readyTwo, (void *)process);
-        break;
-    default:
-        perror("Error: priority has to be: 0, 1, 2\n");
-        free(process);
-        PIDCounter--;
-        break;
-    }
+    List_append(allProcesses, (void *)process);
+    List_prepend(process->readyQueue, (void *)process);
+    process->processState = READY;
 }
 
 void createProcess(int priority)
@@ -102,8 +94,29 @@ void createProcess(int priority)
     newProcess->PID = PIDCounter;
     newProcess->processState = READY;
     newProcess->priority = priority;
+    newProcess->messageReceived = false;
+
+    if (priority == 0)
+    {
+        newProcess->readyQueue = readyZero;
+    }
+    else if (priority == 1)
+    {
+        newProcess->readyQueue = readyOne;
+    }
+    else if (priority == 2)
+    {
+        newProcess->readyQueue = readyTwo;
+    }
+    else
+    {
+        perror("Error: priority has to be: 0, 1, 2\n");
+        free(newProcess);
+        PIDCounter--;
+        return;
+    }
     PIDCounter++;
-    putProcessOnQueue(newProcess, priority);
+    putProcessOnQueue(newProcess);
 }
 
 void forkProcess()
@@ -119,8 +132,11 @@ void forkProcess()
     newProcess->PID = PIDCounter;
     newProcess->priority = runningProcess->priority;
     newProcess->processState = READY;
+    newProcess->readyQueue = runningProcess->readyQueue;
+    newProcess->messageReceived = runningProcess->messageReceived;
+    strcpy(runningProcess->currMessage, runningProcess->currMessage);
     PIDCounter++;
-    putProcessOnQueue(newProcess, newProcess->priority);
+    putProcessOnQueue(newProcess);
 }
 
 bool pComparator(void *pItem, void *pComparisonArg)
@@ -128,6 +144,13 @@ bool pComparator(void *pItem, void *pComparisonArg)
     return ((PCB *)pItem)->PID == *((int *)pComparisonArg);
 }
 
+/**
+ * @brief Kills a process with a given PID.
+ *
+ * @param delPID The PID of the process to kill.
+ *
+ * @return None.
+ */
 void killProcess(int delPID)
 {
     if (runningProcess->PID == delPID)
@@ -140,29 +163,11 @@ void killProcess(int delPID)
     PCB *foundItem = List_search(allProcesses, pComparator, &delPID);
     if (foundItem != NULL)
     {
-        switch (foundItem->priority)
-        {
-        case 0:
-            List_first(readyZero);
-            List_search(readyZero, pComparator, &delPID);
-            List_remove(readyZero);
-            List_remove(allProcesses);
-            break;
-        case 1:
-            List_first(readyOne);
-            List_search(readyOne, pComparator, &delPID);
-            List_remove(readyOne);
-            List_remove(allProcesses);
-            break;
-        case 2:
-            List_first(readyTwo);
-            List_search(readyTwo, pComparator, &delPID);
-            List_remove(readyTwo);
-            List_remove(allProcesses);
-            break;
-        default:
-            break;
-        }
+        List *readyQ = foundItem->readyQueue;
+        List_first(readyQ);
+        List_search(readyQ, pComparator, &delPID);
+        List_remove(readyQ);
+        List_remove(allProcesses);
     }
     else
     {
@@ -172,63 +177,52 @@ void killProcess(int delPID)
 
 void exitRunningProcess()
 {
-    if (runningProcess != initProcess)
+    if (runningProcess->PID != initProcess->PID)
     {
         List_first(allProcesses);
         List_search(allProcesses, pComparator, &(runningProcess->PID));
         List_remove(allProcesses);
-        if (List_count(readyZero) > 0)
-        {
-            setProcessAsRunning(readyZero);
-        }
-        else if (List_count(readyOne) > 0)
-        {
-            setProcessAsRunning(readyOne);
-        }
-        else if (List_count(readyTwo) > 0)
-        {
-            setProcessAsRunning(readyTwo);
-        }
-        else
-        {
-            runningProcess->processState = READY;
-            runningProcess = initProcess;
-            runningProcess->processState = RUNNING;
-        }
+        List *readyQ = runningProcess->readyQueue;
+        List_first(readyQ);
+        List_search(readyQ, pComparator, &(runningProcess->PID));
+        List_remove(readyQ);
+        setNextRunningProcess();
     }
 }
 
-void setProcessAsRunning(List *queue)
+void setNextRunningProcess()
 {
-    runningProcess = (PCB *)List_trim(queue);
+    if (List_count(readyZero) > 0)
+    {
+        runningProcess = (PCB *)List_trim(readyZero);
+    }
+    else if (List_count(readyOne) > 0)
+    {
+        runningProcess = (PCB *)List_trim(readyOne);
+    }
+    else if (List_count(readyTwo) > 0)
+    {
+        runningProcess = (PCB *)List_trim(readyTwo);
+    }
+    else
+    {
+        runningProcess = initProcess;
+    }
     runningProcess->processState = RUNNING;
+}
+void returnProcessToQueue(PCB *process)
+{
+    List *readyQ = process->readyQueue;
+    List_prepend(readyQ, (void *)process);
+    process->processState = READY;
 }
 
 void quantumExpire()
 {
-    runningProcess->processState = READY;
-    if (runningProcess != initProcess)
-        putProcessOnQueue(runningProcess, runningProcess->priority);
-    if (List_count(readyZero) > 0)
-    {
-        setProcessAsRunning(readyZero);
-    }
-    else if (List_count(readyOne) > 0)
-    {
-        setProcessAsRunning(readyOne);
-    }
-    else if (List_count(readyTwo) > 0)
-    {
-        setProcessAsRunning(readyTwo);
-    }
-    else
-    {
-        runningProcess->processState = READY;
-        if (runningProcess != initProcess)
-            putProcessOnQueue(runningProcess, runningProcess->priority);
-        runningProcess = initProcess;
-        runningProcess->processState = RUNNING;
-    }
+    PCB *oldRunningProcess = runningProcess;
+    setNextRunningProcess();
+    if (oldRunningProcess->PID != initProcess->PID)
+        returnProcessToQueue(oldRunningProcess);
 }
 
 void totalInfo()
@@ -249,6 +243,10 @@ void totalInfo()
 
     printf("Priority 2: ");
     printListPIDs(readyTwo);
+    printf("\n");
+
+    printf("Blocked Senders: ");
+    printListPIDs(blockedSendersQueue);
     printf("\n\n");
 
     printf("The currently running process is: {PID: %d, State: %d, Priority: %d}\n", runningProcess->PID, runningProcess->processState, runningProcess->priority);
@@ -257,55 +255,79 @@ void totalInfo()
 
 /**
  * @brief Blocks a process from running.
- * 
+ *
  * @param process The process to block.
  * @param blockType Indicates whether the process is blocked as a sender(0) or a receiver(1).
- * 
+ *
  * @return None.
  */
 void blockProcess(PCB *process, bool blockType)
 {
-    PCB* blockedProcess = process;
-    switch (process->priority)
+    PCB *blockedProcess = process;
+    List *readyQ = blockedProcess->readyQueue;
+    blockedProcess->processState = BLOCKED;
+    List_first(readyQ);
+    List_search(readyQ, pComparator, &process->PID);
+    List_remove(readyQ);
+
+    if (blockType == 0)
     {
-    case 0:
-        List_first(readyZero);
-        List_search(readyZero, pComparator, &process->PID);
-        List_remove(readyZero);
-        break;
-    case 1:
-        List_first(readyOne);
-        List_search(readyOne, pComparator, &process->PID);
-        List_remove(readyOne);
-        break;
-    case 2:
-        List_first(readyTwo);
-        List_search(readyTwo, pComparator, &process->PID);
-        List_remove(readyTwo);
-        break;
-    default:
-        break;
+        List_prepend(blockedSendersQueue, (void *)blockedProcess);
     }
-    if (blockType == 0){
-       List_prepend(blockedSenders, (void *)blockedProcess);
-    } else if (blockType == 1){
-       List_prepend(blockedReceivers, (void *)blockedProcess);
+    else if (blockType == 1)
+    {
+        List_prepend(blockedReceivers, (void *)blockedProcess);
     }
 }
 
-void sendMessage(int sendPID, const char *msg)
+void sendMessage(int sendPID, Message *msg)
 {
     List_first(allProcesses);
     PCB *foundItem = List_search(allProcesses, pComparator, &sendPID);
+
     if (foundItem != NULL)
     {
-        List_prepend(foundItem->incomingMessages, (void *)msg);
-        quantumExpire();
-        blockProcess(foundItem, 0);
+        msg->senderPID = runningProcess->PID;
+        List_first(blockedReceivers);
+        PCB *blockedReceiver = List_search(blockedReceivers, pComparator, &sendPID);
+
+        if (blockedReceiver != NULL)
+        {
+            List_remove(blockedReceivers);
+            putProcessOnQueue(blockedReceiver);
+        }
+        PCB *sender = runningProcess;
+        List_prepend(foundItem->incomingMessages, (void *)msg->message);
+        setNextRunningProcess();
+        blockProcess(sender, 0);
     }
     else
     {
         perror("Process PID not found");
+    }
+}
+
+void unblockSender(PCB* process){
+    List_first(blockedSendersQueue);
+    PCB* blockedSender = List_search(blockedSendersQueue, pComparator, process->PID);
+    
+}
+
+void receive()
+{
+    Message *msg = List_trim(runningProcess->incomingMessages);
+    if (msg != NULL)
+    {
+        List_first(allProcesses);
+        unblockSender(List_search(allProcesses, msg->senderPID));
+        runningProcess->messageReceived = true;
+        strcpy(runningProcess->currMessage, msg->message);
+    }
+    else
+    {
+        PCB *blockedProcess = runningProcess;
+        setNextRunningProcess();
+        blockProcess(blockedProcess, 1);
     }
 }
 
@@ -338,10 +360,19 @@ void handleInput(char input)
         int sendPID;
         printf("Type receiver PID: \n");
         scanf("%d", &sendPID);
-        char msg[40];
+
+        // Clear input buffer before reading the message
+        while (getchar() != '\n')
+            ; // Clear input buffer
+
+        Message *msg = (Message *)malloc(sizeof(Message));
         printf("Type message: \n");
-        scanf("%s", msg);
-        sendMessage(pid, msg);
+        scanf("%[^\n]%*c", msg->message);
+
+        sendMessage(sendPID, msg);
+        break;
+    case 'R':
+        receive();
         break;
     default:
         break;
